@@ -445,7 +445,8 @@ import difflib
 import re
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-model_path = FINAL_DIR if os.path.exists(f"{FINAL_DIR}/config.json") else CKPT_DIR
+last_ckpt = transformers.trainer_utils.get_last_checkpoint(CKPT_DIR) if os.path.isdir(CKPT_DIR) else None
+model_path = FINAL_DIR if os.path.exists(f"{FINAL_DIR}/config.json") else (last_ckpt or CKPT_DIR)
 infer_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(f"Loading inference model from: {model_path} on {infer_device}...")
