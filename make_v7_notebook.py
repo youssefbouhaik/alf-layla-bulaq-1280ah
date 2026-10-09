@@ -255,11 +255,13 @@ nb['cells'][11]['source'] = [
     '## 6. Training Configuration: Clean ByT5 Training & Comprehensive Validation\n',
     '- **Fresh Initialization:** Starts from official `google/byt5-small` weights (zero old checkpoint pollution).\n',
     '- **Conservative Copy Prior:** Anchored by 35% identity pairs in the dataset to prevent unnecessary mutations.\n',
+    '- **Adaptive Arguments:** Dynamically detects supported hyperparameters across Transformers versions.\n',
     '- **Fast Evaluation:** Evaluates CER, WER, and Unnecessary Change Rate (UCR) on a fixed validation subset during training.\n',
     '- **Local NVMe Storage:** Saves directly to high-speed NVMe checkpoints.'
 ]
 
-new_cell_12 = """import numpy as np
+new_cell_12 = """import inspect
+import numpy as np
 import torch
 import evaluate
 import difflib
@@ -337,38 +339,58 @@ use_bf16 = (HW == "tpu") or (HW == "cuda" and torch.cuda.is_bf16_supported())
 batch_size = 16 if HW == "cuda" else 8
 grad_accum = 2 if HW == "cuda" else 4
 
-training_args = Seq2SeqTrainingArguments(
-    output_dir=CKPT_DIR,
-    optim="adafactor",
-    learning_rate=4e-4,
-    lr_scheduler_type="linear",
-    warmup_ratio=0.06,
-    per_device_train_batch_size=batch_size,
-    per_device_eval_batch_size=batch_size,
-    gradient_accumulation_steps=grad_accum,
-    num_train_epochs=5,
-    weight_decay=0.01,
-    max_grad_norm=1.0,
-    bf16=use_bf16,
-    fp16=False,
-    gradient_checkpointing=False,
-    group_by_length=(HW == "cuda"),
-    eval_strategy="steps",
-    eval_steps=200,
-    save_strategy="steps",
-    save_steps=200,
-    save_total_limit=2,
-    load_best_model_at_end=True,
-    metric_for_best_model="cer",
-    greater_is_better=False,
-    predict_with_generate=True,
-    generation_max_length=512,
-    generation_num_beams=1,
-    logging_steps=25,
-    report_to="none",
-    seed=42,
-    dataloader_num_workers=0,
-)
+# Inspect accepted arguments dynamically to prevent unexpected keyword argument errors
+args_sig = inspect.signature(Seq2SeqTrainingArguments.__init__).parameters
+
+args_dict = {
+    "output_dir": CKPT_DIR,
+    "optim": "adafactor",
+    "learning_rate": 4e-4,
+    "lr_scheduler_type": "linear",
+    "per_device_train_batch_size": batch_size,
+    "per_device_eval_batch_size": batch_size,
+    "gradient_accumulation_steps": grad_accum,
+    "num_train_epochs": 5,
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "bf16": use_bf16,
+    "fp16": False,
+    "gradient_checkpointing": False,
+    "group_by_length": (HW == "cuda"),
+    "save_steps": 200,
+    "save_total_limit": 2,
+    "load_best_model_at_end": True,
+    "metric_for_best_model": "cer",
+    "greater_is_better": False,
+    "predict_with_generate": True,
+    "generation_max_length": 512,
+    "generation_num_beams": 1,
+    "logging_steps": 25,
+    "report_to": "none",
+    "seed": 42,
+    "dataloader_num_workers": 0,
+}
+
+# Warmup: universal warmup_steps (compatible with all transformers versions)
+if "warmup_steps" in args_sig:
+    args_dict["warmup_steps"] = 150
+elif "warmup_ratio" in args_sig:
+    args_dict["warmup_ratio"] = 0.06
+
+# Evaluation strategy compatibility (eval_strategy vs evaluation_strategy)
+if "eval_strategy" in args_sig:
+    args_dict["eval_strategy"] = "steps"
+    args_dict["eval_steps"] = 200
+elif "evaluation_strategy" in args_sig:
+    args_dict["evaluation_strategy"] = "steps"
+    args_dict["eval_steps"] = 200
+
+if "save_strategy" in args_sig:
+    args_dict["save_strategy"] = "steps"
+
+# Filter strictly to parameters accepted by the installed Seq2SeqTrainingArguments
+filtered_args = {k: v for k, v in args_dict.items() if k in args_sig}
+training_args = Seq2SeqTrainingArguments(**filtered_args)
 
 data_collator = DataCollatorForSeq2Seq(
     tokenizer, 
@@ -377,15 +399,22 @@ data_collator = DataCollatorForSeq2Seq(
     pad_to_multiple_of=8 if HW == "cuda" else None
 )
 
-trainer = Seq2SeqTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized_train,
-    eval_dataset=eval_subset,
-    data_collator=data_collator,
-    compute_metrics=compute_metrics,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=4)],
-)
+trainer_sig = inspect.signature(Seq2SeqTrainer.__init__).parameters
+trainer_kwargs = {
+    "model": model,
+    "args": training_args,
+    "train_dataset": tokenized_train,
+    "eval_dataset": eval_subset,
+    "data_collator": data_collator,
+    "compute_metrics": compute_metrics,
+    "callbacks": [EarlyStoppingCallback(early_stopping_patience=4)],
+}
+if "processing_class" in trainer_sig:
+    trainer_kwargs["processing_class"] = tokenizer
+elif "tokenizer" in trainer_sig:
+    trainer_kwargs["tokenizer"] = tokenizer
+
+trainer = Seq2SeqTrainer(**trainer_kwargs)
 
 # Clean fresh training with google/byt5-small (Zero old checkpoint pollution)
 print(f"🚀 Starting fresh Conservative ByT5 training on {len(tokenized_train):,} chunk pairs (Epochs: 5)...")
